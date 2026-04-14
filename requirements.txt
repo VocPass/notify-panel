@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+httpx[http2]
+httpx-sse
+pyjwt[crypto]
+python-dotenv

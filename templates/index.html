@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VocPass 推播通知</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .log-entry { animation: fadeIn 0.2s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    #progress-bar-inner { transition: width 0.3s ease; }
+    .user-detail { display: none; }
+    .user-card.expanded .user-detail { display: flex; }
+    .user-card.expanded .chevron { transform: rotate(180deg); }
+    .chevron { transition: transform 0.2s ease; }
+    .avatar-img { object-fit: cover; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <div class="max-w-3xl mx-auto py-10 px-4">
+
+    <!-- Header -->
+    <div class="mb-8">
+      <h1 class="text-2xl font-bold text-gray-800">VocPass 推播通知面板</h1>
+      <p class="text-sm text-gray-500 mt-1">選擇使用者並發送 iOS 推播通知</p>
+    </div>
+
+    <!-- Message Form -->
+    <div class="bg-white rounded-2xl shadow-sm p-6 mb-6">
+      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4">訊息內容</h2>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">標題</label>
+          <input id="title" type="text" placeholder="通知標題"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">內容</label>
+          <textarea id="body" rows="3" placeholder="通知內容（選填）"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- User List -->
+    <div class="bg-white rounded-2xl shadow-sm p-6 mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide">選擇使用者</h2>
+        <div class="flex gap-2">
+          <button onclick="selectAll()" class="text-xs text-blue-600 hover:text-blue-800 font-medium">全選</button>
+          <span class="text-gray-300">|</span>
+          <button onclick="deselectAll()" class="text-xs text-gray-500 hover:text-gray-700 font-medium">取消全選</button>
+          <span class="text-gray-300">|</span>
+          <button onclick="loadUsers()" class="text-xs text-gray-500 hover:text-gray-700 font-medium">重新載入</button>
+        </div>
+      </div>
+
+      <!-- Search -->
+      <div class="mb-3">
+        <input id="user-search" type="text" placeholder="搜尋使用者…"
+          oninput="filterUsers()"
+          class="w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50" />
+      </div>
+
+      <div id="user-list" class="space-y-1.5 max-h-96 overflow-y-auto pr-1">
+        <p class="text-sm text-gray-400 text-center py-6">載入中…</p>
+      </div>
+
+      <div class="mt-3 text-xs text-gray-400" id="selected-count">已選擇 0 人</div>
+    </div>
+
+    <!-- Send Button -->
+    <button id="send-btn" onclick="startSend()"
+      class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 text-sm transition-colors">
+      發送通知
+    </button>
+
+    <!-- Progress Panel -->
+    <div id="progress-panel" class="hidden mt-6 bg-white rounded-2xl shadow-sm p-6">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide">發送進度</h2>
+        <span id="progress-label" class="text-sm text-gray-500">0 / 0</span>
+      </div>
+
+      <!-- Progress Bar -->
+      <div class="w-full bg-gray-100 rounded-full h-2 mb-4">
+        <div id="progress-bar-inner" class="bg-blue-500 h-2 rounded-full" style="width: 0%"></div>
+      </div>
+
+      <!-- Log -->
+      <div id="log" class="space-y-1 max-h-64 overflow-y-auto font-mono text-xs"></div>
+
+      <!-- Summary -->
+      <div id="summary" class="hidden mt-4 pt-4 border-t border-gray-100 text-sm text-center font-medium"></div>
+    </div>
+
+  </div>
+
+  <script>
+    const BASE_URL = 'https://vppb.zeabur.app';
+    const COLLECTION_ID = 'pbc_2424200676';
+
+    let allUsers = [];
+    let filteredUsers = [];
+
+    function getAvatarUrl(u) {
+      // Try avatar from expanded user relation first, then device record itself
+      const usr = u.expand?.user;
+      const src = usr || u;
+      const srcId = usr ? usr.id : u.id;
+      const srcCol = usr ? (usr.collectionId || usr.collectionName || 'users') : COLLECTION_ID;
+      const file = src.avatar || src.photo || src.picture || src.profilePhoto || src.profile_photo || '';
+      if (!file) return null;
+      return `${BASE_URL}/api/files/${srcCol}/${srcId}/${file}?thumb=200x200`;
+    }
+
+    function getDisplayName(u) {
+      const usr = u.expand?.user;
+      if (usr) return usr.name || usr.username || usr.email || usr.id;
+      return u.name || u.username || u.email || u.id;
+    }
+
+    function getEmail(u) {
+      const usr = u.expand?.user;
+      return (usr?.email) || u.email || '';
+    }
+
+    function getUsername(u) {
+      const usr = u.expand?.user;
+      return (usr?.username) || u.username || '';
+    }
+
+    function avatarFallback(el, name) {
+      const initials = (name || '?').trim().charAt(0).toUpperCase();
+      el.outerHTML = `<div class="avatar-placeholder w-full h-full flex items-center justify-center text-white font-bold text-lg bg-blue-400 rounded-full">${initials}</div>`;
+    }
+
+    async function loadUsers() {
+      const list = document.getElementById('user-list');
+      list.innerHTML = '<p class="text-sm text-gray-400 text-center py-6">載入中…</p>';
+
+      try {
+        const res = await fetch('/api/users');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        allUsers = data.items || [];
+        filteredUsers = allUsers;
+        renderUsers(filteredUsers);
+      } catch (e) {
+        list.innerHTML = `<p class="text-sm text-red-500 text-center py-6">載入失敗：${e.message}</p>`;
+      }
+    }
+
+    function filterUsers() {
+      const q = document.getElementById('user-search').value.trim().toLowerCase();
+      filteredUsers = q
+        ? allUsers.filter(u => {
+            const flat = JSON.stringify(u).toLowerCase();
+            return flat.includes(q);
+          })
+        : allUsers;
+      renderUsers(filteredUsers);
+    }
+
+    function renderUsers(users) {
+      const list = document.getElementById('user-list');
+      if (users.length === 0) {
+        list.innerHTML = '<p class="text-sm text-gray-400 text-center py-6">找不到使用者</p>';
+        return;
+      }
+
+      list.innerHTML = users.map(u => {
+        const name = getDisplayName(u);
+        const email = getEmail(u);
+        const username = getUsername(u);
+        const hasToken = !!(u.apns_token || u.device_token);
+        const avatarUrl = getAvatarUrl(u);
+        const uid = escAttr(u.id);
+        const safeName = escHtml(name);
+
+        // Avatar (list row only)
+        const smallAvatar = avatarUrl
+          ? `<img src="${escAttr(avatarUrl)}" alt="" class="avatar-img w-6 h-6 rounded-full shrink-0" onerror="avatarFallback(this,'${escAttr(name)}')" />`
+          : `<div class="w-6 h-6 rounded-full bg-blue-400 flex items-center justify-center text-white text-xs font-bold shrink-0">${escHtml(name.charAt(0).toUpperCase())}</div>`;
+
+        // Only show last_action and last_send
+        const show = ['last_action', 'last_send', 'drivetoken', 'apns_token'];
+        const extras = show
+          .filter(k => u[k] !== undefined && u[k] !== '' && u[k] !== null)
+          .map(k => `<div class="text-xs text-gray-500"><span class="font-medium text-gray-600">${escHtml(k)}:</span> ${escHtml(String(u[k]))}</div>`)
+          .join('');
+
+        return `
+        <div class="user-card border border-gray-100 rounded-lg overflow-hidden" id="card-${uid}">
+          <!-- Row (always visible) -->
+          <div class="flex items-center gap-2 px-2 py-1.5 cursor-pointer hover:bg-gray-50 select-none"
+               onclick="toggleCard('${uid}')">
+            <input type="checkbox" class="user-checkbox w-3.5 h-3.5 accent-blue-600 shrink-0"
+              value="${uid}" onchange="updateCount()" onclick="event.stopPropagation()"
+              ${hasToken ? '' : 'disabled title="無 APNS Token"'} />
+            ${smallAvatar}
+            <div class="flex-1 min-w-0">
+              <div class="text-xs font-medium text-gray-800 truncate">${safeName}</div>
+              ${email && email !== name ? `<div class="text-xs text-gray-400 truncate">${escHtml(email)}</div>` : ''}
+            </div>
+            ${!hasToken ? '<span class="text-xs text-orange-400 shrink-0">無裝置</span>' : ''}
+            <svg class="chevron w-3.5 h-3.5 text-gray-300 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+            </svg>
+          </div>
+
+          <!-- Expanded detail (no avatar repeated) -->
+          <div class="user-detail flex-col gap-0.5 px-3 py-2 bg-gray-50 border-t border-gray-100">
+            ${email ? `<div class="text-xs text-gray-500">${escHtml(email)}</div>` : ''}
+            ${username && username !== name ? `<div class="text-xs text-gray-500">@${escHtml(username)}</div>` : ''}
+            <div class="text-xs ${hasToken ? 'text-green-600' : 'text-orange-400'}">
+              ${hasToken ? '✓ 已綁定裝置' : '✗ 未綁定裝置'}
+            </div>
+            ${extras}
+          </div>
+        </div>`;
+      }).join('');
+
+      updateCount();
+    }
+
+    function toggleCard(uid) {
+      const card = document.getElementById('card-' + uid);
+      card.classList.toggle('expanded');
+    }
+
+    function selectAll() {
+      document.querySelectorAll('.user-checkbox:not(:disabled)').forEach(cb => cb.checked = true);
+      updateCount();
+    }
+
+    function deselectAll() {
+      document.querySelectorAll('.user-checkbox').forEach(cb => cb.checked = false);
+      updateCount();
+    }
+
+    function updateCount() {
+      const count = document.querySelectorAll('.user-checkbox:checked').length;
+      document.getElementById('selected-count').textContent = `已選擇 ${count} 人`;
+    }
+
+    function escHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function escAttr(str) {
+      return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    async function startSend() {
+      const title = document.getElementById('title').value.trim();
+      const body = document.getElementById('body').value.trim();
+      const userIds = [...document.querySelectorAll('.user-checkbox:checked')].map(cb => cb.value);
+
+      if (!title) { alert('請輸入通知標題'); return; }
+      if (userIds.length === 0) { alert('請至少選擇一位使用者'); return; }
+
+      const btn = document.getElementById('send-btn');
+      btn.disabled = true;
+      btn.textContent = '發送中…';
+
+      // Reset progress panel
+      const panel = document.getElementById('progress-panel');
+      panel.classList.remove('hidden');
+      document.getElementById('log').innerHTML = '';
+      document.getElementById('summary').classList.add('hidden');
+      document.getElementById('summary').textContent = '';
+      setProgress(0, userIds.length);
+
+      try {
+        const res = await fetch('/api/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_ids: userIds, title, body }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+        const { job_id } = await res.json();
+        await streamProgress(job_id, userIds.length);
+      } catch (e) {
+        appendLog('error', `發送失敗：${e.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '發送通知';
+      }
+    }
+
+    function streamProgress(jobId, total) {
+      return new Promise((resolve) => {
+        const es = new EventSource(`/api/progress/${jobId}`);
+
+        es.onmessage = (e) => {
+          const event = JSON.parse(e.data);
+
+          if (event.type === 'sending') {
+            appendLog('sending', `[${event.index}/${event.total}] 發送中 → ${event.name}`);
+          } else if (event.type === 'success') {
+            appendLog('success', `[${event.index}/${event.total}] 成功 ✓ ${event.name}`);
+            setProgress(event.index, event.total);
+          } else if (event.type === 'error') {
+            appendLog('error', `[${event.index}/${event.total}] 失敗 ✗ ${event.name}：${event.error || ''}`);
+            setProgress(event.index, event.total);
+          } else if (event.type === 'done') {
+            setProgress(event.total, event.total);
+            const summary = document.getElementById('summary');
+            summary.classList.remove('hidden');
+            const ok = event.success ?? 0;
+            const fail = event.failed ?? 0;
+            if (fail === 0) {
+              summary.className = 'mt-4 pt-4 border-t border-gray-100 text-sm text-center font-medium text-green-600';
+              summary.textContent = `全部發送完成！共 ${ok} 則`;
+            } else {
+              summary.className = 'mt-4 pt-4 border-t border-gray-100 text-sm text-center font-medium text-orange-500';
+              summary.textContent = `發送完成：成功 ${ok} 則，失敗 ${fail} 則`;
+            }
+            es.close();
+            resolve();
+          } else if (event.type === 'timeout') {
+            appendLog('error', '連線逾時');
+            es.close();
+            resolve();
+          }
+        };
+
+        es.onerror = () => {
+          appendLog('error', '進度連線中斷');
+          es.close();
+          resolve();
+        };
+      });
+    }
+
+    function setProgress(current, total) {
+      const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+      document.getElementById('progress-bar-inner').style.width = pct + '%';
+      document.getElementById('progress-label').textContent = `${current} / ${total}`;
+    }
+
+    function appendLog(type, msg) {
+      const log = document.getElementById('log');
+      const div = document.createElement('div');
+      div.className = 'log-entry px-1 py-0.5 rounded ';
+      if (type === 'success') div.className += 'text-green-700';
+      else if (type === 'error') div.className += 'text-red-600';
+      else if (type === 'sending') div.className += 'text-blue-600';
+      else div.className += 'text-gray-600';
+      div.textContent = msg;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    // Init
+    loadUsers();
+  </script>
+</body>
+</html>
