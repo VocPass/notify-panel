@@ -35,14 +35,14 @@ def make_jwt_token():
     return jwt.encode(payload, private_key, algorithm="ES256", headers=headers)
 
 
-async def send_notification(title: str, body: str, apns_token: str):
+async def send_notification(title: str, body: str, apns_token: str, jwt_token: str):
     if not apns_token:
         return
 
     host = APNS_HOST_SANDBOX if CONFIG["use_sandbox"] else APNS_HOST_PRODUCTION
     url = f"https://{host}/3/device/{apns_token}"
 
-    token = make_jwt_token()
+    token = jwt_token
     headers = {
         "authorization": f"bearer {token}",
         "apns-topic": CONFIG["bundle_id"],

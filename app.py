@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from typing import List
 from dotenv import load_dotenv
 
-from send_notification import send_notification
+from send_notification import send_notification, make_jwt_token
 
 load_dotenv()
 
@@ -92,12 +92,24 @@ async def do_send(job_id: str, req: SendRequest):
         try:
             tok = await get_admin_token(client)
         except Exception as e:
-            await queue.put({"type": "error", "name": "認證", "index": 0, "total": total, "error": str(e)})
-            await queue.put({"type": "done", "total": total, "success": 0, "failed": total})
+            await queue.put(
+                {
+                    "type": "error",
+                    "name": "認證",
+                    "index": 0,
+                    "total": total,
+                    "error": str(e),
+                }
+            )
+            await queue.put(
+                {"type": "done", "total": total, "success": 0, "failed": total}
+            )
             return
 
         success_count = 0
         failed_count = 0
+
+        jwt_token = make_jwt_token()
 
         for i, user_id in enumerate(req.user_ids):
             try:
@@ -107,42 +119,55 @@ async def do_send(job_id: str, req: SendRequest):
                 )
                 r.raise_for_status()
                 user = r.json()
-                name = user.get("name") or user.get("username") or user.get("email") or user_id
+                name = (
+                    user.get("name")
+                    or user.get("username")
+                    or user.get("email")
+                    or user_id
+                )
                 apns_token = user.get("apns_token") or user.get("device_token") or ""
 
-                await queue.put({
-                    "type": "sending",
-                    "name": name,
-                    "index": i + 1,
-                    "total": total,
-                })
+                await queue.put(
+                    {
+                        "type": "sending",
+                        "name": name,
+                        "index": i + 1,
+                        "total": total,
+                    }
+                )
 
-                await send_notification(req.title, req.body, apns_token)
+                await send_notification(req.title, req.body, apns_token, jwt_token)
 
-                await queue.put({
-                    "type": "success",
-                    "name": name,
-                    "index": i + 1,
-                    "total": total,
-                })
+                await queue.put(
+                    {
+                        "type": "success",
+                        "name": name,
+                        "index": i + 1,
+                        "total": total,
+                    }
+                )
                 success_count += 1
 
             except Exception as e:
                 failed_count += 1
-                await queue.put({
-                    "type": "error",
-                    "name": user_id,
-                    "index": i + 1,
-                    "total": total,
-                    "error": str(e),
-                })
+                await queue.put(
+                    {
+                        "type": "error",
+                        "name": user_id,
+                        "index": i + 1,
+                        "total": total,
+                        "error": str(e),
+                    }
+                )
 
-    await queue.put({
-        "type": "done",
-        "total": total,
-        "success": success_count,
-        "failed": failed_count,
-    })
+    await queue.put(
+        {
+            "type": "done",
+            "total": total,
+            "success": success_count,
+            "failed": failed_count,
+        }
+    )
 
 
 @app.get("/api/progress/{job_id}")
