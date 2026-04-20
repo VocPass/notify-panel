@@ -85,7 +85,7 @@ async def send(req: SendRequest):
 
 
 BATCH_SIZE = 100  # PocketBase filter chunk size
-CONCURRENCY = 50  # max parallel APNs sends
+CONCURRENCY = 500  # max parallel APNs sends
 
 
 async def fetch_users_batch(
