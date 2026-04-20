@@ -35,36 +35,39 @@ def make_jwt_token():
     return jwt.encode(payload, private_key, algorithm="ES256", headers=headers)
 
 
-async def send_notification(title: str, body: str, apns_token: str, jwt_token: str):
+async def send_notification(
+    title: str,
+    body: str,
+    apns_token: str,
+    jwt_token: str,
+    client: httpx.AsyncClient | None = None,
+):
     if not apns_token:
         return
 
     host = APNS_HOST_SANDBOX if CONFIG["use_sandbox"] else APNS_HOST_PRODUCTION
     url = f"https://{host}/3/device/{apns_token}"
 
-    token = jwt_token
     headers = {
-        "authorization": f"bearer {token}",
+        "authorization": f"bearer {jwt_token}",
         "apns-topic": CONFIG["bundle_id"],
         "apns-push-type": "alert",
         "apns-priority": "10",
     }
 
-    payload = {
-        "aps": {
-            "alert": {
-                "title": title,
-                "body": body,
-            },
-            "sound": "default",
-        }
-    }
-    payload_json = json.dumps(payload, ensure_ascii=False)
+    payload_json = json.dumps(
+        {"aps": {"alert": {"title": title, "body": body}, "sound": "default"}},
+        ensure_ascii=False,
+    )
 
-    async with httpx.AsyncClient(http2=True) as client:
+    if client is not None:
         resp = await client.post(url, headers=headers, content=payload_json)
+    else:
+        async with httpx.AsyncClient(http2=True) as c:
+            resp = await c.post(url, headers=headers, content=payload_json)
 
     if resp.status_code == 200:
         NOTIFICATION_TOTAL.labels(status="success").inc()
     else:
         NOTIFICATION_TOTAL.labels(status="failed").inc()
+        raise RuntimeError(f"APNs error {resp.status_code}: {resp.text}")
