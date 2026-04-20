@@ -84,90 +84,82 @@ async def send(req: SendRequest):
     return {"job_id": job_id}
 
 
+BATCH_SIZE = 100  # PocketBase filter chunk size
+CONCURRENCY = 50  # max parallel APNs sends
+
+
+async def fetch_users_batch(
+    client: httpx.AsyncClient, tok: str, user_ids: List[str]
+) -> dict:
+    """Fetch all users in bulk using OR filters instead of N individual requests."""
+    users_by_id: dict = {}
+    for offset in range(0, len(user_ids), BATCH_SIZE):
+        chunk = user_ids[offset : offset + BATCH_SIZE]
+        filter_expr = "||".join(f'id="{uid}"' for uid in chunk)
+        r = await client.get(
+            f"{BASE_URL}/api/collections/{COLLECTION_ID}/records",
+            headers={"Authorization": tok},
+            params={"filter": f"({filter_expr})", "perPage": BATCH_SIZE},
+        )
+        r.raise_for_status()
+        for item in r.json().get("items", []):
+            users_by_id[item["id"]] = item
+    return users_by_id
+
+
 async def do_send(job_id: str, req: SendRequest):
     queue = jobs[job_id]
     total = len(req.user_ids)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as db_client:
         try:
-            tok = await get_admin_token(client)
+            tok = await get_admin_token(db_client)
         except Exception as e:
             await queue.put(
-                {
-                    "type": "error",
-                    "name": "認證",
-                    "index": 0,
-                    "total": total,
-                    "error": str(e),
-                }
+                {"type": "error", "name": "認證", "index": 0, "total": total, "error": str(e)}
             )
-            await queue.put(
-                {"type": "done", "total": total, "success": 0, "failed": total}
-            )
+            await queue.put({"type": "done", "total": total, "success": 0, "failed": total})
             return
 
-        success_count = 0
-        failed_count = 0
+        try:
+            users_by_id = await fetch_users_batch(db_client, tok, req.user_ids)
+        except Exception as e:
+            await queue.put(
+                {"type": "error", "name": "批量查詢", "index": 0, "total": total, "error": str(e)}
+            )
+            await queue.put({"type": "done", "total": total, "success": 0, "failed": total})
+            return
 
-        jwt_token = make_jwt_token()
+    jwt_token = make_jwt_token()
+    semaphore = asyncio.Semaphore(CONCURRENCY)
+    results: list[bool] = []
 
-        for i, user_id in enumerate(req.user_ids):
-            try:
-                r = await client.get(
-                    f"{BASE_URL}/api/collections/{COLLECTION_ID}/records/{user_id}",
-                    headers={"Authorization": tok},
-                )
-                r.raise_for_status()
-                user = r.json()
-                name = (
-                    user.get("name")
-                    or user.get("username")
-                    or user.get("email")
-                    or user_id
-                )
-                apns_token = user.get("apns_token") or user.get("device_token") or ""
+    async with httpx.AsyncClient(http2=True) as apns_client:
 
-                await queue.put(
-                    {
-                        "type": "sending",
-                        "name": name,
-                        "index": i + 1,
-                        "total": total,
-                    }
-                )
+        async def send_one(i: int, user_id: str) -> bool:
+            user = users_by_id.get(user_id, {})
+            name = user.get("name") or user.get("username") or user.get("email") or user_id
+            apns_token = user.get("apns_token") or user.get("device_token") or ""
 
-                await send_notification(req.title, req.body, apns_token, jwt_token)
+            async with semaphore:
+                await queue.put({"type": "sending", "name": name, "index": i + 1, "total": total})
+                try:
+                    await send_notification(req.title, req.body, apns_token, jwt_token, apns_client)
+                    await queue.put({"type": "success", "name": name, "index": i + 1, "total": total})
+                    return True
+                except Exception as e:
+                    await queue.put(
+                        {"type": "error", "name": name, "index": i + 1, "total": total, "error": str(e)}
+                    )
+                    return False
 
-                await queue.put(
-                    {
-                        "type": "success",
-                        "name": name,
-                        "index": i + 1,
-                        "total": total,
-                    }
-                )
-                success_count += 1
+        results = list(
+            await asyncio.gather(*[send_one(i, uid) for i, uid in enumerate(req.user_ids)])
+        )
 
-            except Exception as e:
-                failed_count += 1
-                await queue.put(
-                    {
-                        "type": "error",
-                        "name": user_id,
-                        "index": i + 1,
-                        "total": total,
-                        "error": str(e),
-                    }
-                )
-
-    await queue.put(
-        {
-            "type": "done",
-            "total": total,
-            "success": success_count,
-            "failed": failed_count,
-        }
-    )
+    success_count = sum(results)
+    failed_count = total - success_count
+    await queue.put({"type": "done", "total": total, "success": success_count, "failed": failed_count})
 
 
 @app.get("/api/progress/{job_id}")
